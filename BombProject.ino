@@ -1,18 +1,24 @@
-#include <LiquidCrystal_I2C.h>
+#include <LiquidCrystal_I2C.h> // Add the I2C LCD library. 
 
-#include <Wire.h>
+#include <Wire.h> // Add the wire library.
 
-#include <Adafruit_Sensor.h>
-#include <Adafruit_ADXL345_U.h>
+#include <Adafruit_Sensor.h> // Add the Adafruit Sensor library.
+#include <Adafruit_ADXL345_U.h> // Add the Adafruit ADXL345 library.
 
-#include "SparkFun_Qwiic_Keypad_Arduino_Library.h"
+#include "SparkFun_Qwiic_Keypad_Arduino_Library.h" // Add the SparkFun Qwiic keypad library.
 
-KEYPAD keypad1;
-LiquidCrystal_I2C lcd(0x27, 16, 2);
+#include <IRremote.h>
 
-Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified();
+const int IRPin = 7;
+IRrecv irrecv(IRPin);
+decode_results results;
 
-void(*restart) (void) = 0;
+KEYPAD keypad1; // Create a new keypad object.
+LiquidCrystal_I2C lcd(0x27, 16, 2); // Create a new LCD object.
+
+Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(); // Create a new ADXL345 object.
+
+void(*restart) (void) = 0; // Define the arduino restart function. 
 
 // modes:
 // 0 - waiting for the bomb to be armed
@@ -21,15 +27,18 @@ void(*restart) (void) = 0;
 // 3 - arm message & bomb ticking & getting the passowrd
 // 4 - bomb exploding / defused & waiting for a restart
 
-int mode = 0;
+int mode = 0; // Define the mode varible.
 
-bool mode1_triggered = false;
-int mode1_currentTimer = 0;
-const int mode1_bounds[3][2] = { {4, 6}, {7, 9}, {10, 12} };
-int mode1_cursorPosition = mode1_bounds[0][0];
-const int mode1_timerMaxValues[3][2] = { {2, 3}, {5, 9}, {5, 9} };
-const String mode1_timerNames[3] = {" Hours", "Minutes", "Seconds"};
-String mode1_timers[3] = {"00", "00", "00"};
+char keypad_currentKey;
+long keypad_lastUpdated = 0;
+
+bool mode1_triggered = false; // Define the mode(1) trigger state varible (default to not triggered).
+int mode1_currentTimer = 0; // Define the mode(1) current timer state varible (default to 0).
+const int mode1_bounds[3][2] = { {4, 6}, {7, 9}, {10, 12} }; // Define the mode(1) LCD bounds array.
+int mode1_cursorPosition = mode1_bounds[0][0]; // Define the mode(1) cursor position and set it to the start of the first LCD bound.
+const int mode1_timerMaxValues[3][2] = { {2, 3}, {5, 9}, {5, 9} }; // Define the mode(1) timer max values.
+const String mode1_timerNames[3] = {" Hours", "Minutes", "Seconds"}; // Define the mode(1) timer names array (by string).
+String mode1_timers[3] = {"00", "00", "00"}; // Define the mode(1) timer current values (default to 00 on all timers).
 
 bool mode2_triggered = false;
 int mode2_cursorPosition = 4;
@@ -42,6 +51,7 @@ int mode3_cursorPosition = mode3_bounds[0];
 long mode3_delayCounter;
 String mode3_password = "";
 int mode3_accelerationValues[3];
+const float mode3_minMoveTriggerValue = 4.0;
 long mode3_MSTime;
 String mode3_timers[3];
 bool mode3_shouldBlink = false;
@@ -53,8 +63,10 @@ int mode3_tickState = 0;
 void mode3_setTickState(long ms) {
   if (ms > 10 * 1000) {
     mode3_tickState = 0;
-  } else {
+  } else if (ms > 2.5 * 1000) {
     mode3_tickState = 1;
+  } else {
+    mode3_tickState = 2;
   }
 }
 long mode3_getTickWait(int state) {
@@ -66,6 +78,10 @@ long mode3_getTickWait(int state) {
     }
     case 1: {
       retval = 500L;
+      break;
+    }
+    case 2: {
+      retval = 250L;
       break;
     }
   }
@@ -99,7 +115,7 @@ String mode3_calculateTime(int type) {
 bool mode3_wasBombMoved(int intialVal[], int currentVal[]) {
   bool retval = false;
   for (int i = 0; i < 3; i++) {
-    if (abs(intialVal[i] - currentVal[i]) > 2.5) {
+    if (abs(intialVal[i] - currentVal[i]) > mode3_minMoveTriggerValue) {
       retval = true;
     }
   }
@@ -109,10 +125,30 @@ bool mode3_wasBombMoved(int intialVal[], int currentVal[]) {
 bool mode4_triggered = false;
 
 const int buzzerPin = 2;
+// [0] - red
+// [1] - green
+// [2] - orange
+const int ledPins[] = {10, 8, 9};
+int ledStates[] = {LOW, LOW, LOW};
+
+void ChangeLedState(int index, int state) {
+  if (ledStates[index] != state) {
+    digitalWrite(ledPins[index], state);
+    ledStates[index] = state; 
+  }
+}
+
+void resetLeds() {
+  for(int i = 0; i < sizeof(ledStates); i++) {
+    ChangeLedState(i, LOW);
+  }
+}
 
 void setup() {
   Serial.begin(9600);
 
+  irrecv.enableIRIn();
+ 
   accel.begin();
   
   lcd.init();
@@ -139,9 +175,28 @@ void setup() {
   keypad1.begin();
 
   pinMode(buzzerPin, OUTPUT);
+  for (int i = 0; i < sizeof(ledPins); i++) {
+    pinMode(ledPins[i], HIGH);
+  }
+
+  ChangeLedState(1, HIGH);
 }
 
 void loop() {
+  if (millis() - keypad_lastUpdated >= 20) {
+    keypad1.updateFIFO();
+    keypad_currentKey = keypad1.getButton();
+    keypad_lastUpdated = millis();
+  } else {
+    keypad_currentKey = 0;
+  }
+  
+  if (keypad_currentKey != -1 && keypad_currentKey != 0) {
+    ChangeLedState(2, HIGH);
+  } else {
+    ChangeLedState(2, LOW);
+  }
+
   switch (mode) {
     case 0: {
       Mode_0();
@@ -163,13 +218,11 @@ void loop() {
       Mode_4();
       break;
     }
-  }
+  } 
 }
 
 void Mode_0() {
-  keypad1.updateFIFO();
-  char button = keypad1.getButton();
-  if (button != -1 && button != 0) {
+  if (keypad_currentKey != -1 && keypad_currentKey != 0) {
     tone(buzzerPin, 5000, 100);
     mode++;
   }
@@ -177,22 +230,20 @@ void Mode_0() {
 
 void Mode_1() {
   if (mode1_triggered) {
-    keypad1.updateFIFO();
-    char button = keypad1.getButton();
-    if (button != 0 && button != -1) {
+    if (keypad_currentKey != 0 && keypad_currentKey != -1) {
       tone(buzzerPin, 5000, 100);
-      if (button != '*' && button != '#' && mode1_cursorPosition < mode1_bounds[mode1_currentTimer][1]) {
-        if (mode1_cursorPosition ==  mode1_bounds[mode1_currentTimer][0] && button - '0' <= mode1_timerMaxValues[mode1_currentTimer][0]) {
-          lcd.print(button);
-          mode1_timers[mode1_currentTimer].setCharAt(0, button);
+      if (keypad_currentKey != '*' && keypad_currentKey != '#' && mode1_cursorPosition < mode1_bounds[mode1_currentTimer][1]) {
+        if (mode1_cursorPosition ==  mode1_bounds[mode1_currentTimer][0] && keypad_currentKey - '0' <= mode1_timerMaxValues[mode1_currentTimer][0]) {
+          lcd.print(keypad_currentKey);
+          mode1_timers[mode1_currentTimer].setCharAt(0, keypad_currentKey);
           mode1_cursorPosition++;
-        } else if (mode1_cursorPosition == mode1_bounds[mode1_currentTimer][1] - 1 && button - '0' <= mode1_timerMaxValues[mode1_currentTimer][1]) {
-          lcd.print(button);
-          mode1_timers[mode1_currentTimer].setCharAt(1, button);
+        } else if (mode1_cursorPosition == mode1_bounds[mode1_currentTimer][1] - 1 && keypad_currentKey - '0' <= mode1_timerMaxValues[mode1_currentTimer][1]) {
+          lcd.print(keypad_currentKey);
+          mode1_timers[mode1_currentTimer].setCharAt(1, keypad_currentKey);
           mode1_cursorPosition++;
           lcd.noBlink();
         }
-      } else if (button == '*') {
+      } else if (keypad_currentKey == '*') {
         if (mode1_cursorPosition > mode1_bounds[mode1_currentTimer][0]) {
           if (mode1_cursorPosition ==  mode1_bounds[mode1_currentTimer][0] + 1) {
             mode1_timers[mode1_currentTimer].setCharAt(0, '0');
@@ -205,18 +256,18 @@ void Mode_1() {
           lcd.blink();
           mode1_cursorPosition--;
         } else if (mode1_currentTimer > 0) {
-          mode1_currentTimer--;
+          mode1_currentTimer--; 
           lcd.setCursor(0, 0);
           lcd.print(mode1_timerNames[mode1_currentTimer] + " (00-" + mode1_timerMaxValues[mode1_currentTimer][0] + mode1_timerMaxValues[mode1_currentTimer][1] + "): ");
           lcd.setCursor(mode1_bounds[mode1_currentTimer][0], 1);
           mode1_cursorPosition = mode1_bounds[mode1_currentTimer][0];
         }
-      } else if (button == '#') {
+      } else if (keypad_currentKey == '#') {
         if (mode1_currentTimer == 2) {
           mode++;
           lcd.noBlink();
         } else {
-          mode1_currentTimer++;
+          mode1_currentTimer++; 
           lcd.setCursor(0, 0);
           lcd.print(mode1_timerNames[mode1_currentTimer] + " (00-" + mode1_timerMaxValues[mode1_currentTimer][0] + mode1_timerMaxValues[mode1_currentTimer][1] + "): ");
           lcd.setCursor(mode1_bounds[mode1_currentTimer][0], 1);
@@ -239,17 +290,15 @@ void Mode_1() {
 
 void Mode_2() {
   if (mode2_triggered) {
-    keypad1.updateFIFO();
-    char button = keypad1.getButton();
-    if (button != 0 && button != -1) {
+    if (keypad_currentKey != 0 && keypad_currentKey != -1) {
       tone(buzzerPin, 5000, 100);
-      if (button != '*' && button != '#' && mode2_cursorPosition < 12) {
-        lcd.print(button);
-        mode2_password += button;
+      if (keypad_currentKey != '*' && keypad_currentKey != '#' && mode2_cursorPosition < 12) {
+        lcd.print(keypad_currentKey);
+        mode2_password += keypad_currentKey;
         mode2_cursorPosition++;
         if (mode2_cursorPosition == 12)
           lcd.noBlink();
-      } else if (button == '*') {
+      } else if (keypad_currentKey == '*') {
         if (mode2_cursorPosition > 4) {
           lcd.setCursor(mode2_cursorPosition - 1, 1);
           lcd.print(' ');
@@ -260,13 +309,13 @@ void Mode_2() {
           mode2_cursorPosition--;
         } else {
           mode--;
-          mode1_currentTimer = 0;
+          mode1_currentTimer = 0; 
           mode1_triggered = false;
           mode1_cursorPosition = mode1_bounds[0][0];
           mode2_triggered  = false;
           lcd.noBlink();
         }
-      } else if (button == '#' && mode2_cursorPosition == 12) {
+      } else if (keypad_currentKey == '#' && mode2_cursorPosition == 12) {
         mode++;
         lcd.noBlink();
       }
@@ -297,8 +346,14 @@ void Mode_3() {
 
     if (didMove) {
         mode3_bombExploded = true;
-        mode++; // explosion
+        mode++; 
         return;
+    }
+
+    if (irrecv.decode(&results)) {
+      mode3_bombExploded = true;
+      mode++;
+      return;
     }
 
     mode3_setTickState(mode3_MSTime);
@@ -308,6 +363,9 @@ void Mode_3() {
     if (millis() - mode3_buzzerDelayCounter >= tickWait) {
       mode3_buzzerDelayCounter = millis();
       tone(buzzerPin, 2146, tickWait / 10);
+      ChangeLedState(0, HIGH);
+    } else {
+      ChangeLedState(0, LOW);
     }
     
     if (millis() - mode3_delayCounter >= 1000L) {
@@ -329,12 +387,10 @@ void Mode_3() {
       }
     }
     
-    keypad1.updateFIFO();
-    char button = keypad1.getButton();
     switch (mode3_submode) {
       case 0 : {
-        if (button != 0 && button != -1) {
-          if (button == '#') {
+        if (keypad_currentKey != 0 && keypad_currentKey != -1) {
+          if (keypad_currentKey == '#') {
             lcd.setCursor(0, 0);
             lcd.print("                ");
             lcd.setCursor(1, 0);
@@ -348,17 +404,17 @@ void Mode_3() {
       }
 
       case 1: {
-        if (button != 0 && button != -1) {
+        if (keypad_currentKey != 0 && keypad_currentKey != -1) {
           tone(buzzerPin, 5000, 100);
-          if (button != '*' && button != '#' && mode3_cursorPosition < mode3_bounds[1]) {
+          if (keypad_currentKey != '*' && keypad_currentKey != '#' && mode3_cursorPosition < mode3_bounds[1]) {
             lcd.setCursor(mode3_cursorPosition, 0);
-            lcd.print(button);
-            mode3_password += button;
+            lcd.print(keypad_currentKey);
+            mode3_password += keypad_currentKey;
             mode3_cursorPosition++;
             if (mode3_cursorPosition == mode3_bounds[1])
               lcd.noBlink();
               mode3_shouldBlink = false;
-            } else if (button == '*') {
+            } else if (keypad_currentKey == '*') {
               if (mode3_cursorPosition > mode3_bounds[0]) {
                 lcd.setCursor(mode3_cursorPosition - 1, 0);
                 lcd.print(' ');
@@ -370,7 +426,7 @@ void Mode_3() {
                 }
                 mode3_cursorPosition--;
                }
-            } else if (button == '#' && mode3_cursorPosition == mode3_bounds[1]) {
+            } else if (keypad_currentKey == '#' && mode3_cursorPosition == mode3_bounds[1]) {
               if (mode3_password == mode2_password) {
                 mode++;
               } else {
@@ -428,44 +484,51 @@ void Mode_3() {
 
 void Mode_4() {
   if (mode4_triggered) {
-    keypad1.updateFIFO();
-    char button = keypad1.getButton();
-    if (button != -1 && button != 0) {
+    if (keypad_currentKey != -1 && keypad_currentKey != 0) {
       tone(buzzerPin, 5000, 100);
+      resetLeds();
       lcd.clear();
       delay(100);
       restart();
     } 
   } else {
     mode4_triggered = true;
+    ChangeLedState(0, HIGH);
     lcd.clear();
     lcd.setCursor(6, 0);
     lcd.print("BOMB");
     lcd.setCursor(4, 1);
     if (mode3_bombExploded) {
       lcd.print("EXPLODED");
+      for(int i = 0; i < 5; i++)
+      {
+        tone(buzzerPin, 2146, 100);
+        delay(200);
+      }
+      for(int i = 0; i < 11; i++)
+      {
+        tone(buzzerPin, 2146, 50);
+        delay(100);
+      }
+      int freq = 2000;
+      tone(buzzerPin, freq, 250);
+      delay(250);
+      for(int i = 0; i < 300; i++)
+      {
+        tone(buzzerPin, freq, 10);
+        delay(10);
+        freq = freq + 10;
+      }
     } else {
       lcd.print("DISABLED");
+      tone(buzzerPin, 2146, 300);
+      delay(350);
+      tone(buzzerPin, 1946, 250);
+      delay(300);
+      tone(buzzerPin, 2146, 300);
+      delay(350);
     }
-    for(int i = 0; i < 5; i++)
-    {
-      tone(buzzerPin, 2146, 100);
-      delay(200);
-    }
-    for(int i = 0; i < 11; i++)
-    {
-      tone(buzzerPin, 2146, 50);
-      delay(100);
-    }
-    tone(buzzerPin, 1760,300);
-    delay(250);
-    int freq = 1760;
-    for(int i = 0; i < 300; i++)
-    {
-      tone(buzzerPin, freq, 10);
-      delay(10);
-      freq = freq + 10;
-    }
+    
     delay(2500);
     lcd.clear();
     lcd.setCursor(0, 0);
