@@ -1,2 +1,2 @@
-# arduino-bomb-project
-This is an adruino school project.
+# arduino-fake-bomb-project
+This is a fake Arduino "bomb" school project.
