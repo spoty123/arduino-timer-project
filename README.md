@@ -1,2 +1,2 @@
-# arduino-fake-bomb-project
-This is a fake Arduino "bomb" school project.
+# arduino-timer-project
+This is an Arduino school project.
